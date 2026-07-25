@@ -28,6 +28,73 @@ The moderator's decision has a fourth real-world option that no single agent can
 department takes on its own. Keeping these as separate types means `agent.verdict ===
 moderator.decision` is a type error, not a silent bug.
 
+## Agent-specific extension fields
+
+Not every agent needs the same top-level fields. An agent MAY include additional structured
+fields beyond the base schema for its own bookkeeping — Product's `opportunity_cost_estimate` is
+the current example (see `product_agent.md`) — subject to two rules:
+
+1. It must be documented in that agent's own prompt file, not invented silently.
+2. **It is not a substitute for `concerns`.** Structured bookkeeping data (a RICE estimate, a
+   confidence score, a provisional number) does not belong in the `concerns` array unless it
+   represents an actual finding someone needs to act on. Forcing every piece of collected data
+   into a `concerns` entry just to "have somewhere to put it" corrupts `verdict` — a proposal
+   with zero real findings should be able to output `verdict: "approved"` with an empty
+   `concerns` array, even if the agent collected non-zero structured data along the way.
+
+### Implementation note for Person 1 — do NOT use `.passthrough()`
+
+The natural instinct when one agent has an extra field is to loosen the schema with
+`.passthrough()`. **Don't do this** — it silently accepts any unvalidated field from any agent,
+which undoes the whole point of the strict tag/category validation in "Backend validation" below.
+An agent that starts hallucinating a stray field would sail through undetected.
+
+Instead, enumerate every known extension field explicitly as `.optional()` on the shared base
+schema. This keeps the schema closed (`.strict()` stays on) while still accepting the fields that
+are actually supposed to exist:
+
+```typescript
+const OpportunityCostEstimateSchema = z.object({
+  reach: z.enum(["low", "medium", "high", "massive"]),
+  impact: z.enum(["minimal", "low", "medium", "high", "massive"]),
+  confidence: z.enum(["low", "medium", "high"]),
+  effort: z.enum(["small", "medium", "large", "massive"]),
+  effort_source: z.enum(["provisional", "reconciled_with_engineering"]),
+});
+
+const DepartmentOutputSchema = z.object({
+  agent: z.enum(["product", "engineering", "security", "legal"]),
+  verdict: z.enum(["approved", "flagged", "blocked"]),
+  summary: z.string(),
+  concerns: z.array(ConcernSchema),
+  confidence: z.number().min(0).max(1),
+  // Agent-specific extension fields — add one line here per new field,
+  // never open the whole schema with .passthrough():
+  opportunity_cost_estimate: OpportunityCostEstimateSchema.optional(),
+}).strict();
+```
+
+When Legal or Engineering introduce their own extension fields later, add them here the same
+way — one named, typed, optional field per addition. This is a five-minute edit each time and
+keeps validation airtight; `.passthrough()` would save that five minutes at the cost of the
+entire strict-validation guarantee.
+
+## Backend validation (for Person 1)
+
+The Output validation self-check in `debate_protocol.md` is the agent's own responsibility, but
+it's a soft check — a model can still emit an invalid tag despite being told not to. The backend
+must enforce this with a real schema (Zod, JSON Schema, or equivalent):
+- `category` and `tags` values checked against each agent's specific allowed list (not just
+  "is this a string") — an invented near-synonym like `no_metrics` instead of `no_leading_metric`
+  should fail validation, not pass through to the frontend.
+- On validation failure: **retry the call once** with the validation error appended to the
+  prompt (e.g. "your previous output used tag `no_metrics`, which isn't in the allowed list —
+  use `no_leading_metric` or `no_lagging_metric` instead",) rather than silently dropping the
+  invalid tag or crashing the request.
+- This is two layers of defense, not one: the agent's own self-check catches most issues before
+  they're even generated; the backend schema is the actual enforcement boundary that guarantees
+  nothing malformed reaches Person 3's frontend.
+
 ## Department Agent Output
 
 ```json
