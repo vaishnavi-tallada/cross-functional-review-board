@@ -6,6 +6,7 @@ moderator — may deviate from it. This exists specifically to prevent two real 
 
 ## States
 
+
 A concern's `status` field (added to the schema) is always one of:
 
 ```
