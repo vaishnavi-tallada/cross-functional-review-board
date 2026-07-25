@@ -33,56 +33,87 @@ export class WorkflowTools {
   }> {
     ctx.logger.info('Starting full review board workflow', { title: input.proposalTitle });
 
-    // Step 1: Round 0 Department Reviews (Fast staggered execution for NitroStudio)
-    ctx.logger.info('Step 1: Running Product review...');
-    const prodRes = await this.productTools.reviewProposal(input, ctx);
-    
-    await new Promise(res => setTimeout(res, 200));
-    ctx.logger.info('Step 1: Running Engineering review...');
-    const engRes = await this.engineeringTools.reviewProposal(input, ctx);
+    try {
+      // Step 1: Round 0 Department Reviews (Parallel execution for maximum speed)
+      ctx.logger.info('Step 1: Running Round 0 parallel department reviews...');
+      const [prodRes, engRes, secRes, legRes] = await Promise.all([
+        this.productTools.reviewProposal(input, ctx),
+        this.engineeringTools.reviewProposal(input, ctx),
+        this.securityTools.reviewProposal(input, ctx),
+        this.legalTools.reviewProposal(input, ctx)
+      ]);
 
-    await new Promise(res => setTimeout(res, 200));
-    ctx.logger.info('Step 1: Running Security review...');
-    const secRes = await this.securityTools.reviewProposal(input, ctx);
+      let prodOutput = prodRes;
+      let engOutput = engRes;
+      let secOutput = secRes;
+      let legOutput = legRes;
 
-    await new Promise(res => setTimeout(res, 200));
-    ctx.logger.info('Step 1: Running Legal review...');
-    const legRes = await this.legTools.reviewProposal(input, ctx);
+      // Step 2: Estimate Reconciliation
+      ctx.logger.info('Step 2: Performing Estimate Reconciliation pass');
+      const reconciliation = this.debateService.reconcileEstimates(prodOutput, engOutput);
+      prodOutput = reconciliation.productOutput;
 
-    let prodOutput = prodRes;
-    let engOutput = engRes;
-    let secOutput = secRes;
-    let legOutput = legRes;
+      let currentOutputs = [prodOutput, engOutput, secOutput, legOutput];
 
-    // Step 2: Estimate Reconciliation
-    ctx.logger.info('Step 2: Performing Estimate Reconciliation pass');
-    const reconciliation = this.debateService.reconcileEstimates(prodOutput, engOutput);
-    prodOutput = reconciliation.productOutput;
+      // Step 3: Debate Round Cycle
+      ctx.logger.info('Step 3: Running Debate Round Cycle...');
+      const proposalText = `Title: ${input.proposalTitle}\n\nDescription: ${input.proposalDescription}`;
+      const debateRes = await this.debateService.runFullDebateCycle(currentOutputs, proposalText, ctx);
+      currentOutputs = debateRes.outputs;
 
-    let currentOutputs = [prodOutput, engOutput, secOutput, legOutput];
+      // Step 4: Moderator Synthesis
+      ctx.logger.info('Step 4: Generating final Moderator report with deterministic decision rules');
+      const finalReport = await this.moderatorTools.synthesizeReport(
+        {
+          proposalTitle: input.proposalTitle,
+          proposalDescription: input.proposalDescription,
+          agentOutputs: currentOutputs
+        },
+        ctx
+      );
 
-    // Step 3: Moderator Synthesis
-    ctx.logger.info('Step 3: Generating final Moderator report with deterministic decision rules');
-    const finalReport = await this.moderatorTools.synthesizeReport(
-      {
-        proposalTitle: input.proposalTitle,
-        proposalDescription: input.proposalDescription,
-        agentOutputs: currentOutputs
-      },
-      ctx
-    );
+      ctx.logger.info('Full decision review board workflow finished successfully', { decision: finalReport.decision });
 
-    ctx.logger.info('Full decision review board workflow finished successfully', { decision: finalReport.decision });
+      return {
+        agentOutputs: currentOutputs,
+        reconciled: reconciliation.reconciled,
+        finalReport
+      };
+    } catch (err: any) {
+      ctx.logger.error('Workflow execution encountered an unhandled error', { error: String(err) });
 
-    return {
-      agentOutputs: currentOutputs,
-      reconciled: reconciliation.reconciled,
-      finalReport
-    };
-  }
+      // Return a safe fallback response so the client receives a structured response instead of a crash
+      const fallbackReport: ModeratorOutput = {
+        decision: 'blocked',
+        decision_basis: 'System error encountered during review board execution: ' + (err?.message || String(err)),
+        overall_summary: 'The review board workflow encountered an unexpected failure during processing. Proposal has been automatically blocked for manual review.',
+        agent_alignment: {
+          product: 'blocked',
+          engineering: 'blocked',
+          security: 'blocked',
+          legal: 'blocked'
+        },
+        unresolved_risks: [
+          {
+            agent: 'security',
+            concern_id: 'sys-error-1',
+            why_unresolved: 'Workflow execution error: ' + (err?.message || String(err))
+          }
+        ],
+        required_actions: [
+          {
+            concern_id: 'sys-error-1',
+            action: 'Inspect system execution logs and re-run review board workflow.',
+            owner_agent: 'engineering'
+          }
+        ]
+      };
 
-  // Helper alias getter for legal tools
-  private get legTools() {
-    return this.legalTools;
+      return {
+        agentOutputs: [],
+        reconciled: false,
+        finalReport: fallbackReport
+      };
+    }
   }
 }

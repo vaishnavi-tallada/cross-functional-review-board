@@ -73,8 +73,9 @@ export class DebateService {
   }
 
   /**
-   * Runs a full structured debate round across all agent outputs.
+   * Runs a full structured debate round across all agent outputs concurrently.
    * Cross-references concerns between Product ↔ Engineering and Security ↔ Legal.
+   * Enforces a 2-round challenge cap: concern becomes "escalated" if unresolved after 2 challenge attempts.
    */
   async runFullDebateCycle(
     outputs: DepartmentOutput[],
@@ -93,31 +94,79 @@ export class DebateService {
       legal: 'security'
     };
 
-    for (const output of updatedOutputs) {
-      const counterpart = counterAgentMap[output.agent];
-      if (!counterpart) continue;
+    // Run up to 2 debate rounds to honor the 2-round cap state machine
+    for (let round = 1; round <= 2; round++) {
+      const roundTasks: {
+        outputIdx: number;
+        concernIdx: number;
+        counterpart: 'product' | 'engineering' | 'security' | 'legal';
+        concern: Concern;
+      }[] = [];
 
-      for (let i = 0; i < output.concerns.length; i++) {
-        const concern = output.concerns[i];
-        if (concern.status === 'open') {
-          try {
-            const exchange = await this.executeChallengeExchange(counterpart, concern, proposalText, ctx);
-            exchanges.push(exchange);
+      for (let oIdx = 0; oIdx < updatedOutputs.length; oIdx++) {
+        const output = updatedOutputs[oIdx];
+        const counterpart = counterAgentMap[output.agent];
+        if (!counterpart) continue;
 
-            if (exchange.stance === 'provides_fact' || exchange.stance === 'agree') {
-              output.concerns[i] = { ...concern, status: 'resolved' };
-            } else if (exchange.stance === 'disagree' || exchange.stance === 'partially_agree') {
-              output.concerns[i] = { ...concern, status: 'challenged' };
-            }
-          } catch (err: any) {
-            ctx.logger.error('Challenge exchange failed', { concernId: concern.id, errorMsg: String(err) });
+        for (let cIdx = 0; cIdx < output.concerns.length; cIdx++) {
+          const concern = output.concerns[cIdx];
+          if (concern.status === 'open' || concern.status === 'challenged') {
+            roundTasks.push({
+              outputIdx: oIdx,
+              concernIdx: cIdx,
+              counterpart,
+              concern
+            });
           }
         }
       }
 
-      const hasHigh = output.concerns.some(c => c.severity === 'high' && c.status !== 'resolved');
-      const hasMedium = output.concerns.some(c => c.severity === 'medium' && c.status !== 'resolved');
-      output.verdict = hasHigh ? 'blocked' : hasMedium ? 'flagged' : 'approved';
+      if (roundTasks.length === 0) break;
+
+      // Execute all challenge exchanges for this round concurrently in parallel
+      const roundResults = await Promise.all(
+        roundTasks.map(t =>
+          this.executeChallengeExchange(t.counterpart, t.concern, proposalText, ctx).catch(err => {
+            ctx.logger.error('Challenge exchange failed', { concernId: t.concern.id, errorMsg: String(err) });
+            return null;
+          })
+        )
+      );
+
+      for (let k = 0; k < roundTasks.length; k++) {
+        const task = roundTasks[k];
+        const exchange = roundResults[k];
+        if (!exchange) continue;
+
+        exchanges.push(exchange);
+
+        const concern = updatedOutputs[task.outputIdx].concerns[task.concernIdx];
+        if (exchange.stance === 'provides_fact' || exchange.stance === 'agree') {
+          updatedOutputs[task.outputIdx].concerns[task.concernIdx] = { ...concern, status: 'resolved' };
+        } else if (exchange.stance === 'disagree' || exchange.stance === 'partially_agree') {
+          if (concern.status === 'open') {
+            updatedOutputs[task.outputIdx].concerns[task.concernIdx] = { ...concern, status: 'challenged' };
+          } else if (concern.status === 'challenged') {
+            // Escalated after 2nd unresolved challenge round
+            updatedOutputs[task.outputIdx].concerns[task.concernIdx] = { ...concern, status: 'escalated' };
+          }
+        }
+      }
+
+      // Re-evaluate agent verdicts post debate round
+      for (const output of updatedOutputs) {
+        const hasEscalated = output.concerns.some(c => c.status === 'escalated');
+        const hasHigh = output.concerns.some(c => c.severity === 'high' && c.status !== 'resolved');
+        const hasMedium = output.concerns.some(c => c.severity === 'medium' && c.status !== 'resolved');
+
+        if (hasEscalated || hasHigh) {
+          output.verdict = 'blocked';
+        } else if (hasMedium) {
+          output.verdict = 'flagged';
+        } else {
+          output.verdict = 'approved';
+        }
+      }
     }
 
     return { outputs: updatedOutputs, exchanges };
@@ -134,14 +183,18 @@ export class DebateService {
   ): Promise<ChallengeRoundOutput> {
     ctx.logger.info('Executing challenge exchange', { respondingAgent, concernId: targetConcern.id });
 
-    const system = `You are the ${respondingAgent} agent on a Decision Review Board.
-Another department raised concern [${targetConcern.id}]:
+    const system = `You are the ${respondingAgent} agent on a Decision Review Board responding to a concern raised by another department.
+Concern [${targetConcern.id}]:
 - Category: ${targetConcern.category}
 - Issue: ${targetConcern.issue}
 - Severity: ${targetConcern.severity}
 - Recommendation: ${targetConcern.recommendation}
 
-Provide a structured challenge response.
+Evaluation Guidelines:
+- Assess if your department can provide a standard fact, technical capability, or compliance mechanism (e.g. Standard Contractual Clauses, automated rollback plan, regional data isolation, or retention analytics) that addresses this concern.
+- If a valid mitigation or fact can be provided, set stance: "provides_fact" or "agree" (which resolves the concern).
+- If the concern cannot be mitigated or represents an unresolvable fundamental risk, set stance: "disagree" or "partially_agree".
+
 Stance options: "agree" | "disagree" | "partially_agree" | "provides_fact"
 
 CRITICAL: Return ONLY a raw JSON object. Do NOT output preamble prose or markdown headers.

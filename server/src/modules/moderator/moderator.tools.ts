@@ -6,9 +6,7 @@ import {
   ModeratorOutput,
   ModeratorOutputSchema,
   ModeratorDecision,
-  Concern,
-  UnresolvedRiskSchema,
-  RequiredActionSchema
+  Concern
 } from '../shared/types.js';
 
 export class ModeratorTools {
@@ -40,9 +38,6 @@ export class ModeratorTools {
     });
 
     // --- Deterministic Decision Engine (Rules 1-4) ---
-    const secOutput = agentOutputs.find(a => a.agent === 'security');
-    const legOutput = agentOutputs.find(a => a.agent === 'legal');
-
     const hasEscalatedSecOrLeg = allConcerns.some(
       c => (c.agent === 'security' || c.agent === 'legal') && c.status === 'escalated'
     );
@@ -119,7 +114,10 @@ Write a concise 2-3 sentence executive summary for senior leaders summarizing wh
       agent_alignment
     };
 
-    ctx.logger.info('Report synthesis complete', { decision: finalReport.decision });
-    return finalReport;
+    // Validate report against ModeratorOutputSchema before returning
+    const validatedReport = ModeratorOutputSchema.parse(finalReport);
+
+    ctx.logger.info('Report synthesis complete', { decision: validatedReport.decision });
+    return validatedReport;
   }
 }

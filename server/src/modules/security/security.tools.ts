@@ -122,24 +122,47 @@ export class SecurityTools {
   async reviewProposal(input: any, ctx: ExecutionContext): Promise<DepartmentOutput> {
     ctx.logger.info('Reviewing proposal (Security)', { title: input.proposalTitle });
 
-    const proposalText = `${input.proposalTitle}\n${input.proposalDescription}`;
-    const layer1 = baselineSections.filter(s => ALWAYS_INCLUDE.includes(s.id));
-    const relevantIds = await classifyRelevantSections(proposalText, this.llmService, ctx);
-    const layer2 = baselineSections.filter(s => relevantIds.includes(s.id));
-    const knowledgeBase = [...layer1, ...layer2];
+    try {
+      const proposalText = `${input.proposalTitle}\n${input.proposalDescription}`;
+      const layer1 = baselineSections.filter(s => ALWAYS_INCLUDE.includes(s.id));
+      const relevantIds = await classifyRelevantSections(proposalText, this.llmService, ctx);
+      const layer2 = baselineSections.filter(s => relevantIds.includes(s.id));
+      const knowledgeBase = [...layer1, ...layer2];
 
-    const { system, user } = this.buildReviewPrompt(input, knowledgeBase);
+      const { system, user } = this.buildReviewPrompt(input, knowledgeBase);
 
-    const modelOutput = await this.llmService.generateStructured<SecurityModelOutput>(
-      system,
-      user,
-      DepartmentOutputSchemaRaw,
-      { temperature: 0.1 }
-    );
+      const modelOutput = await this.llmService.generateStructured<SecurityModelOutput>(
+        system,
+        user,
+        DepartmentOutputSchemaRaw,
+        { temperature: 0.1 }
+      );
 
-    const final = this.finalize(modelOutput, input, ctx);
-    ctx.logger.info('Security review complete', { verdict: final.verdict, count: final.concerns.length });
-    return final;
+      const final = this.finalize(modelOutput, input, ctx);
+      ctx.logger.info('Security review complete', { verdict: final.verdict, count: final.concerns.length });
+      return final;
+    } catch (err: any) {
+      ctx.logger.error('Security review failed, returning fallback output', { errorMsg: String(err) });
+      return {
+        agent: 'security',
+        verdict: 'flagged',
+        confidence: 0.5,
+        summary: 'Security review encountered an execution error and defaulted to flagged status.',
+        concerns: [
+          {
+            id: 'sec-execution-error-1',
+            category: 'execution_error',
+            tags: ['system_error'],
+            issue: `Security review tool encountered an exception: ${err?.message || String(err)}`,
+            severity: 'medium',
+            recommendation: 'Re-run security review or inspect system logs.',
+            responds_to: null,
+            status: 'open',
+            requested_context: null
+          }
+        ]
+      };
+    }
   }
 
   private finalize(
