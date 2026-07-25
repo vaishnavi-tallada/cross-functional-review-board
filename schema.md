@@ -1,4 +1,4 @@
-# Agent Output Schema (v4 — canonical source of truth)
+# Agent Output Schema (v5 — canonical source of truth)
 
 This is the contract every department agent (Product, Engineering, Security, Legal) and the
 Moderator must follow exactly. Person 1 parses this on the backend. Person 3 mocks this on the
@@ -28,19 +28,40 @@ The moderator's decision has a fourth real-world option that no single agent can
 department takes on its own. Keeping these as separate types means `agent.verdict ===
 moderator.decision` is a type error, not a silent bug.
 
+## Canonical Effort Sizing Scale
+
+Both Product (`opportunity_cost_estimate.effort`) and Engineering (`effort_assessment.size`) use
+the same four-value effort scale. This exists specifically so "large" means the same thing to both
+agents — without a shared definition, the Estimate Reconciliation pass (see
+`debate_protocol.md` → Estimate Reconciliation) would be comparing numbers that look aligned but
+aren't, and nobody would notice until a downstream date slipped.
+
+| Value | Week range | Notes |
+|---|---|---|
+| `small` | < 1 week | Config change, copy change, small isolated fix |
+| `medium` | 1–3 weeks | Single-team, well-understood pattern |
+| `large` | 3–8 weeks | Multi-week build, novel integration, or non-trivial architecture change |
+| `massive` | 8+ weeks | Multi-team effort, or a genuinely open-ended/unbounded scope |
+
+Both agents must map their own estimate onto these four values and these ranges specifically —
+neither agent invents an informal parallel scale ("pretty big," "not too bad"). Product's Round 0
+value is explicitly provisional (`effort_source: "provisional"`); Engineering's is authoritative
+from the start (see `engineering_agent.md` → `effort_assessment`).
+
 ## Agent-specific extension fields
 
 Not every agent needs the same top-level fields. An agent MAY include additional structured
-fields beyond the base schema for its own bookkeeping — Product's `opportunity_cost_estimate` is
-the current example (see `product_agent.md`) — subject to two rules:
+fields beyond the base schema for its own bookkeeping — Product's `opportunity_cost_estimate` and
+Engineering's `effort_assessment` are the current examples (see `product_agent.md` and
+`engineering_agent.md`) — subject to two rules:
 
 1. It must be documented in that agent's own prompt file, not invented silently.
-2. **It is not a substitute for `concerns`.** Structured bookkeeping data (a RICE estimate, a
-   confidence score, a provisional number) does not belong in the `concerns` array unless it
-   represents an actual finding someone needs to act on. Forcing every piece of collected data
-   into a `concerns` entry just to "have somewhere to put it" corrupts `verdict` — a proposal
-   with zero real findings should be able to output `verdict: "approved"` with an empty
-   `concerns` array, even if the agent collected non-zero structured data along the way.
+2. **It is not a substitute for `concerns`.** Structured bookkeeping data (a RICE estimate, an
+   effort size, a confidence score) does not belong in the `concerns` array unless it represents
+   an actual finding someone needs to act on. Forcing every piece of collected data into a
+   `concerns` entry just to "have somewhere to put it" corrupts `verdict` — a proposal with zero
+   real findings should be able to output `verdict: "approved"` with an empty `concerns` array,
+   even if the agent collected non-zero structured data along the way.
 
 ### Implementation note for Person 1 — do NOT use `.passthrough()`
 
@@ -62,6 +83,14 @@ const OpportunityCostEstimateSchema = z.object({
   effort_source: z.enum(["provisional", "reconciled_with_engineering"]),
 });
 
+const EffortAssessmentSchema = z.object({
+  size: z.enum(["small", "medium", "large", "massive"]),
+  basis: z.enum(["known_pattern", "novel_integration", "hidden_integration_cost"]),
+  confidence: z.enum(["low", "medium", "high"]),
+  source: z.enum(["initial", "revised_post_challenge"]),
+  revision_reason: z.string().nullable(),
+});
+
 const DepartmentOutputSchema = z.object({
   agent: z.enum(["product", "engineering", "security", "legal"]),
   verdict: z.enum(["approved", "flagged", "blocked"]),
@@ -71,13 +100,21 @@ const DepartmentOutputSchema = z.object({
   // Agent-specific extension fields — add one line here per new field,
   // never open the whole schema with .passthrough():
   opportunity_cost_estimate: OpportunityCostEstimateSchema.optional(),
+  effort_assessment: EffortAssessmentSchema.optional(),
 }).strict();
 ```
 
-When Legal or Engineering introduce their own extension fields later, add them here the same
-way — one named, typed, optional field per addition. This is a five-minute edit each time and
-keeps validation airtight; `.passthrough()` would save that five minutes at the cost of the
-entire strict-validation guarantee.
+**Backend enforcement note for `effort_assessment.revision_reason`**: this field is `nullable()`,
+not `.optional()` — it must always be present, with `null` as an explicit value when `source` is
+`"initial"`, and a non-empty string required when `source` is `"revised_post_challenge"`. Person 1
+should add a `.refine()` check enforcing that pairing (see `debate_protocol.md` → Estimate
+Reconciliation for why a missing `revision_reason` on a revised value is treated as invalid
+output, same as an unresolved concern with no cited reason).
+
+When Legal introduces its own extension field later, add it here the same way — one named, typed
+field per addition. This is a five-minute edit each time and keeps validation airtight;
+`.passthrough()` would save that five minutes at the cost of the entire strict-validation
+guarantee.
 
 ## Backend validation (for Person 1)
 
@@ -167,7 +204,8 @@ retrieval) didn't supply a needed fact. It is resolved differently from all othe
   "responds_to": "sec-1",
   "stance": "agree" | "disagree" | "partially_agree" | "provides_fact",
   "response": "Direct reply to the specific concern, not a restatement of your own position.",
-  "revised_verdict": "approved" | "flagged" | "blocked" | null
+  "revised_verdict": "approved" | "flagged" | "blocked" | null,
+  "effort_assessment": null
 }
 ```
 
@@ -175,6 +213,34 @@ retrieval) didn't supply a needed fact. It is resolved differently from all othe
 concern with the actual missing detail (e.g. "target region is North America only") — this is
 different from `agree`/`disagree`, which are risk-judgment stances. `revised_verdict` is null
 unless this response actually changes the agent's original verdict.
+
+**Extension-field revision during a challenge round**: if a challenge-round exchange causes an
+agent to revise one of its own extension fields (currently only relevant to Engineering's
+`effort_assessment` — see `engineering_agent.md` → Staleness and re-emission), the agent emits a
+full, updated `effort_assessment` object alongside its Challenge Round Output, with `source:
+"revised_post_challenge"` and a populated `revision_reason`. This is not a new top-level output
+type — it's the same `effort_assessment` shape, re-emitted with its `source` and
+`revision_reason` fields updated to reflect what changed and why. `null` on every other Challenge
+Round Output where nothing is being revised.
+
+**Implementation note for Person 1**: `ChallengeRoundOutputSchema` must declare these extension
+fields explicitly, the same way `DepartmentOutputSchema` does — a bare `.strict()` schema with no
+`effort_assessment` key will reject Engineering's re-emission with an "unrecognized key" error the
+moment it actually tries to use this mechanism:
+
+```typescript
+const ChallengeRoundOutputSchema = z.object({
+  agent: z.enum(["product", "engineering", "security", "legal"]),
+  responds_to: z.string(),
+  stance: z.enum(["agree", "disagree", "partially_agree", "provides_fact"]),
+  response: z.string(),
+  revised_verdict: z.enum(["approved", "flagged", "blocked"]).nullable(),
+  // Same extension-field pattern as DepartmentOutputSchema — keep these two lists in sync
+  // whenever a new extension field is added to either schema:
+  effort_assessment: EffortAssessmentSchema.optional(),
+  opportunity_cost_estimate: OpportunityCostEstimateSchema.optional(),
+}).strict();
+```
 
 ## Moderator Output (final decision report)
 
@@ -212,6 +278,10 @@ never re-derive or reinterpret them here.
    America" is not the same kind of act as accepting "HTTPS is a sufficient mitigation" — the
    schema and protocol treat them differently on purpose, to avoid both false deadlocks and
    false agreement.
-4. **Everything renders without extra logic.** Person 3 should be able to map `severity` directly
+4. **Cross-agent numeric contracts share one definition.** Product's `opportunity_cost_estimate`
+   and Engineering's `effort_assessment` both draw from the same Canonical Effort Sizing Scale —
+   two agents independently defining "large" would let the Estimate Reconciliation pass compare
+   incompatible numbers without anyone noticing.
+5. **Everything renders without extra logic.** Person 3 should be able to map `severity` directly
    to a color and `verdict` directly to a badge, with no additional interpretation needed on the
    frontend.
