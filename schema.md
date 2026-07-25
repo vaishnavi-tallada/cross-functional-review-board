@@ -111,10 +111,19 @@ should add a `.refine()` check enforcing that pairing (see `debate_protocol.md` 
 Reconciliation for why a missing `revision_reason` on a revised value is treated as invalid
 output, same as an unresolved concern with no cited reason).
 
-When Legal introduces its own extension field later, add it here the same way — one named, typed
-field per addition. This is a five-minute edit each time and keeps validation airtight;
-`.passthrough()` would save that five minutes at the cost of the entire strict-validation
-guarantee.
+When Legal or another agent introduces its own extension field later, add it here the same way —
+one named, typed field per addition. This is a five-minute edit each time and keeps validation
+airtight; `.passthrough()` would save that five minutes at the cost of the entire
+strict-validation guarantee.
+
+**Current status (v5): Legal has no extension field.** `legal_agent.md` outputs the standard
+`DepartmentOutputSchema` shape only — `agent`, `verdict`, `summary`, `concerns`, `confidence` —
+with `opportunity_cost_estimate` and `effort_assessment` both absent (`undefined`, not `null`,
+consistent with `.optional()` semantics), never present as empty objects or placeholder values.
+This is deliberate, not incomplete: Legal's review doesn't produce a piece of cross-agent
+bookkeeping data the way Product's RICE estimate or Engineering's effort size does — its findings
+live entirely in `concerns`. Person 1 should not expect or validate for a Legal-specific key on
+`DepartmentOutputSchema` unless a future prompt revision documents one, per the rule above.
 
 ## Backend validation (for Person 1)
 
@@ -204,24 +213,35 @@ retrieval) didn't supply a needed fact. It is resolved differently from all othe
   "responds_to": "sec-1",
   "stance": "agree" | "disagree" | "partially_agree" | "provides_fact",
   "response": "Direct reply to the specific concern, not a restatement of your own position.",
-  "revised_verdict": "approved" | "flagged" | "blocked" | null,
-  "effort_assessment": null
+  "revised_verdict": "approved" | "flagged" | "blocked" | null
 }
 ```
+
+This is the standard shape — note that `effort_assessment` is not shown here at all, because it's
+`.optional()`, not `.nullable()`, on `ChallengeRoundOutputSchema` (see the Zod block below). The
+field must be **omitted entirely** when nothing is being revised, not included with an explicit
+`null` value — an agent emitting `"effort_assessment": null` on every ordinary response would fail
+validation against `.optional()`, which permits the key's absence, not an explicit null. This
+mirrors the same `undefined`-not-`null` convention documented above for Legal's
+`DepartmentOutputSchema` output.
 
 `stance: "provides_fact"` is used specifically when responding to a `missing_information`
 concern with the actual missing detail (e.g. "target region is North America only") — this is
 different from `agree`/`disagree`, which are risk-judgment stances. `revised_verdict` is null
-unless this response actually changes the agent's original verdict.
+unless this response actually changes the agent's original verdict. (Unlike `effort_assessment`,
+`revised_verdict` genuinely is `.nullable()` rather than `.optional()` — it's always present, with
+`null` as its explicit default value. The two fields intentionally use different conventions:
+`revised_verdict` is a required field whose value happens to often be "nothing changed," while
+`effort_assessment` is a field that doesn't apply at all to most responses.)
 
 **Extension-field revision during a challenge round**: if a challenge-round exchange causes an
 agent to revise one of its own extension fields (currently only relevant to Engineering's
 `effort_assessment` — see `engineering_agent.md` → Staleness and re-emission), the agent emits a
 full, updated `effort_assessment` object alongside its Challenge Round Output, with `source:
 "revised_post_challenge"` and a populated `revision_reason`. This is not a new top-level output
-type — it's the same `effort_assessment` shape, re-emitted with its `source` and
-`revision_reason` fields updated to reflect what changed and why. `null` on every other Challenge
-Round Output where nothing is being revised.
+type — it's the same `effort_assessment` shape, added as a key on the same response. The key is
+present only in this revision case; it is omitted, never set to `null`, on every other Challenge
+Round Output.
 
 **Implementation note for Person 1**: `ChallengeRoundOutputSchema` must declare these extension
 fields explicitly, the same way `DepartmentOutputSchema` does — a bare `.strict()` schema with no
