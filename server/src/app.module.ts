@@ -1,6 +1,7 @@
 import { McpApp, Module, ConfigModule } from '@nitrostack/core';
-import { CalculatorModule } from './modules/calculator/calculator.module.js';
+import { SecurityModule } from './modules/security/security.module.js';
 import { SystemHealthCheck } from './health/system.health.js';
+import { GeminiHealthCheck } from './health/gemini.health.js';
 
 /**
  * Root Application Module
@@ -11,7 +12,7 @@ import { SystemHealthCheck } from './health/system.health.js';
 @McpApp({
   module: AppModule,
   server: {
-    name: 'calculator-server',
+    name: 'cfrb-mcp-server',
     version: '1.0.0'
   },
   logging: {
@@ -23,11 +24,12 @@ import { SystemHealthCheck } from './health/system.health.js';
   description: 'Root application module',
   imports: [
     ConfigModule.forRoot(),
-    CalculatorModule
+    SecurityModule
   ],
   providers: [
     // Health Checks
     SystemHealthCheck,
+    GeminiHealthCheck,
   ]
 })
 export class AppModule {}
