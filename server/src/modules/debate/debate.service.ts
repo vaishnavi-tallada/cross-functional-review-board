@@ -48,7 +48,7 @@ export class DebateService {
           category: 'opportunity_cost',
           tags: ['effort_mismatch', 'high_resource_bet'],
           issue: `Reconciled engineering effort is ${engSize}, which represents a high resource bet given ${isLowImpact ? 'low impact' : 'low confidence'}.`,
-          severity: 'high',
+          severity: 'medium',
           recommendation: 'Re-evaluate ROI or trim scope to reduce effort size.',
           responds_to: null,
           status: 'open',
@@ -57,8 +57,8 @@ export class DebateService {
       }
     }
 
-    const hasHigh = updatedConcerns.some(c => c.severity === 'high');
-    const hasMedium = updatedConcerns.some(c => c.severity === 'medium');
+    const hasHigh = updatedConcerns.some(c => c.severity === 'high' && c.status !== 'resolved');
+    const hasMedium = updatedConcerns.some(c => c.severity === 'medium' && c.status !== 'resolved');
     const updatedVerdict = hasHigh ? 'blocked' : hasMedium ? 'flagged' : productOutput.verdict;
 
     return {
@@ -151,17 +151,22 @@ export class DebateService {
             updatedOutputs[task.outputIdx].concerns[task.concernIdx] = { ...concern, status: 'escalated' };
           }
         }
+
+        // Apply revised verdict if provided by exchange
+        if (exchange.revised_verdict) {
+          updatedOutputs[task.outputIdx].verdict = exchange.revised_verdict;
+        }
       }
 
-      // Re-evaluate agent verdicts post debate round
+      // Re-evaluate agent verdicts post debate round with realistic severity gating
       for (const output of updatedOutputs) {
-        const hasEscalated = output.concerns.some(c => c.status === 'escalated');
-        const hasHigh = output.concerns.some(c => c.severity === 'high' && c.status !== 'resolved');
-        const hasMedium = output.concerns.some(c => c.severity === 'medium' && c.status !== 'resolved');
+        const hasEscalatedHigh = output.concerns.some(c => c.severity === 'high' && c.status === 'escalated');
+        const hasUnresolvedHigh = output.concerns.some(c => c.severity === 'high' && c.status !== 'resolved');
+        const hasUnresolvedMedOrLow = output.concerns.some(c => (c.severity === 'medium' || c.severity === 'low') && c.status !== 'resolved');
 
-        if (hasEscalated || hasHigh) {
+        if (hasEscalatedHigh || hasUnresolvedHigh) {
           output.verdict = 'blocked';
-        } else if (hasMedium) {
+        } else if (hasUnresolvedMedOrLow) {
           output.verdict = 'flagged';
         } else {
           output.verdict = 'approved';
@@ -193,7 +198,8 @@ Concern [${targetConcern.id}]:
 Evaluation Guidelines:
 - Assess if your department can provide a standard fact, technical capability, or compliance mechanism (e.g. Standard Contractual Clauses, automated rollback plan, regional data isolation, or retention analytics) that addresses this concern.
 - If a valid mitigation or fact can be provided, set stance: "provides_fact" or "agree" (which resolves the concern).
-- If the concern cannot be mitigated or represents an unresolvable fundamental risk, set stance: "disagree" or "partially_agree".
+- If the concern cannot be mitigated immediately or represents an open action item required before production rollout, set stance: "partially_agree" and set revised_verdict: "flagged".
+- If the concern represents an unresolvable fundamental risk (e.g. no consent, automated employment termination without human override), set stance: "disagree" and set revised_verdict: "blocked".
 
 Stance options: "agree" | "disagree" | "partially_agree" | "provides_fact"
 

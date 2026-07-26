@@ -39,7 +39,7 @@ export class ModeratorTools {
 
     // --- Deterministic Decision Engine (Rules 1-4) ---
     const hasEscalatedSecOrLeg = allConcerns.some(
-      c => (c.agent === 'security' || c.agent === 'legal') && c.status === 'escalated'
+      c => (c.agent === 'security' || c.agent === 'legal') && c.status === 'escalated' && c.severity === 'high'
     );
     const hasBlockedVerdict = agentOutputs.some(a => a.verdict === 'blocked');
     const hasFlaggedVerdict = agentOutputs.some(a => a.verdict === 'flagged');
@@ -50,16 +50,16 @@ export class ModeratorTools {
 
     if (hasEscalatedSecOrLeg) {
       decision = 'blocked';
-      decisionBasis = 'Rule 1: An escalated Security or Legal concern exists — domain owners hold veto authority.';
+      decisionBasis = 'Rule 1: An escalated High-Severity Security or Legal concern exists — domain owners hold veto authority. Deployment cannot proceed.';
     } else if (hasBlockedVerdict) {
       decision = 'blocked';
-      decisionBasis = 'Rule 2: At least one department output verdict is blocked.';
+      decisionBasis = 'Rule 2: At least one department output verdict is blocked due to unmitigatable high-risk policy violations. Deployment cannot proceed.';
     } else if (hasFlaggedVerdict || hasUnresolvedConcerns) {
       decision = 'approved_with_conditions';
-      decisionBasis = 'Rule 3: One or more departments flagged concerns or open items require action before launch.';
+      decisionBasis = 'Rule 3: The proposal demonstrates clear business value and is technically feasible. However, deployment is contingent upon completion of mandatory actions identified during cross-functional review.';
     } else {
       decision = 'approved';
-      decisionBasis = 'Rule 4: All department verdicts are approved and all concerns are resolved.';
+      decisionBasis = 'Rule 4: All department verdicts are approved and all concerns have been fully resolved.';
     }
 
     // Build unresolved risks & required actions deterministically from concerns
@@ -102,7 +102,11 @@ Write a concise 2-3 sentence executive summary for senior leaders summarizing wh
     try {
       overall_summary = await this.llmService.generateText(summaryPrompt, userPrompt, { temperature: 0.2 });
     } catch {
-      overall_summary = `The Decision Review Board reached a final decision of ${decision}. ${decisionBasis}`;
+      overall_summary = decision === 'approved_with_conditions'
+        ? 'The proposal demonstrates clear business value and technical feasibility. However, production deployment is contingent upon completing mandatory security, legal, and engineering actions.'
+        : decision === 'blocked'
+        ? 'The proposal has been blocked due to severe unresolved privacy, legal, or security policy violations that cannot be mitigated.'
+        : 'The proposal has been fully approved with zero outstanding policy blockers.';
     }
 
     const finalReport: ModeratorOutput = {
